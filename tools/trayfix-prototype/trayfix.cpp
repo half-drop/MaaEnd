@@ -1,11 +1,16 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <psapi.h>
 #include <shellapi.h>
 #include <winnt.h>
 #include <cstring>
 
 #pragma comment(lib, "kernel32.lib")
+
+extern "C" __declspec(dllimport) DWORD WINAPI K32GetModuleFileNameExW(
+    HANDLE hProcess,
+    HMODULE hModule,
+    LPWSTR lpFilename,
+    DWORD nSize);
 
 using ShellNotifyIconWFn = BOOL (WINAPI*)(DWORD, PNOTIFYICONDATAW);
 using ExitProcessFn = VOID (WINAPI*)(UINT);
@@ -43,7 +48,8 @@ static BOOL WINAPI HookShellNotifyIconW(DWORD message, PNOTIFYICONDATAW data) {
         if (message == NIM_ADD) {
             AcquireSRWLockExclusive(&g_tray_lock);
             std::memset(&g_tray_nid, 0, sizeof(g_tray_nid));
-            const SIZE_T copy_size = min<SIZE_T>(data->cbSize, sizeof(g_tray_nid));
+            const SIZE_T copy_size =
+                data->cbSize < sizeof(g_tray_nid) ? data->cbSize : sizeof(g_tray_nid);
             std::memcpy(&g_tray_nid, data, copy_size);
             g_have_tray = true;
             ReleaseSRWLockExclusive(&g_tray_lock);
