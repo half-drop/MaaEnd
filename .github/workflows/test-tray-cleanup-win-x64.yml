@@ -1,0 +1,198 @@
+name: test-tray-cleanup-win-x64
+
+on:
+  push:
+    branches:
+      - agent/fix-tray-cleanup
+    paths:
+      - ".github/workflows/test-tray-cleanup-win-x64.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout MaaEnd
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          submodules: true
+
+      - name: Setup Windows 10 SDK
+        uses: GuillaumeFalourd/setup-windows10-sdk-action@v2.5
+        with:
+          sdk-version: 26100
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "agent/go-service/go.mod"
+          cache-dependency-path: |
+            agent/go-service/go.mod
+            agent/go-service/go.sum
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Clone MXU
+        shell: pwsh
+        run: git clone --depth 1 https://github.com/MistEO/MXU.git mxu-src
+
+      - name: Patch MXU tray cleanup
+        shell: python
+        run: |
+          from pathlib import Path
+
+          tray = Path('mxu-src/src-tauri/src/tray.rs')
+          text = tray.read_text(encoding='utf-8')
+          marker = '\n/// 显示主窗口\n'
+          cleanup = r'''
+/// 显式移除系统托盘图标。
+///
+/// Tauri 的 TrayIcon 是引用计数对象；MXU 还在静态 TRAY_ICON 中保存了一份引用。
+/// 如果应用直接退出而不取出这份静态引用，底层 tray-icon 的 Drop 不会执行，
+/// Windows 因而收不到 NIM_DELETE，Explorer 会暂时保留“幽灵”托盘图标。
+pub fn cleanup_tray(app: &AppHandle) {
+    let tray = TRAY_ICON
+        .get()
+        .and_then(|tray_mutex| tray_mutex.lock().ok())
+        .and_then(|mut guard| guard.take());
+
+    if let Some(tray) = tray {
+        let id = tray.id().clone();
+
+        // Tauri 在资源表中还保存了一份 TrayIcon clone；显式移除它。
+        if let Some(registered_tray) = app.remove_tray_by_id(&id) {
+            drop(registered_tray);
+        }
+
+        // 释放 MXU 静态变量持有的最后一份引用，使底层 Windows 托盘对象执行 Drop。
+        drop(tray);
+        log::info!("System tray icon removed before exit");
+    }
+}
+'''
+          if 'pub fn cleanup_tray(app: &AppHandle)' not in text:
+              if marker not in text:
+                  raise SystemExit('tray.rs insertion marker not found')
+              text = text.replace(marker, '\n' + cleanup + marker, 1)
+              tray.write_text(text, encoding='utf-8')
+
+          lib = Path('mxu-src/src-tauri/src/lib.rs')
+          text = lib.read_text(encoding='utf-8')
+          old = '''        .run(|_app_handle, event| {
+            // 退出前收尾遥测（结束 Session 与悬挂 Transaction 并 flush）
+            if matches!(event, tauri::RunEvent::Exit) {
+                commands::telemetry::on_app_exit();
+            }
+        });'''
+          new = '''        .run(|app_handle, event| {
+            match event {
+                // 在事件循环真正退出前显式移除托盘，确保 Windows 收到 NIM_DELETE。
+                tauri::RunEvent::ExitRequested { .. } => {
+                    tray::cleanup_tray(app_handle);
+                }
+                // 退出前收尾遥测（结束 Session 与悬挂 Transaction 并 flush）
+                tauri::RunEvent::Exit => {
+                    commands::telemetry::on_app_exit();
+                }
+                _ => {}
+            }
+        });'''
+          if old not in text:
+              raise SystemExit('lib.rs exit handler block not found')
+          lib.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+      - name: Install MXU frontend dependencies
+        working-directory: mxu-src
+        run: pnpm install
+
+      - name: Build patched MXU
+        working-directory: mxu-src
+        run: pnpm tauri build --no-bundle --target x86_64-pc-windows-msvc
+
+      - name: Download MaaFramework
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: MaaXYZ/MaaFramework
+          latest: true
+          fileName: "MAA-win-x86_64*"
+          out-file-path: "deps"
+          extract: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bootstrap MaaDeps
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/maadeps-download.py x64-windows
+
+      - name: Setup WebView2 SDK
+        shell: bash
+        run: python tools/dep_3rdparty.py --webview2
+
+      - name: Build and install MaaEnd agents/resources
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python tools/build_and_install.py --cpp-algo --ci --os win --arch x86_64 --version v0.0.0-tray-fix
+
+          echo "Install MaaFramework"
+          cp -r deps/bin/* install/maafw/
+          cp -r deps/share/MaaAgentBinary install/maafw/
+          rm -rf install/maafw/MaaNode*
+
+          echo "Install patched MXU"
+          cp mxu-src/src-tauri/target/x86_64-pc-windows-msvc/release/mxu.exe install/MaaEnd.exe
+
+          echo "Merge pipeline JSON"
+          python -m pip install json5
+          python tools/merge_pipeline.py install
+
+          echo "Update interface.json"
+          python -m pip install maafw
+          python tools/fill_interface.py --version "v0.0.0-tray-fix" --interface install/interface.json
+
+      - name: Convert PNG to ICO
+        shell: bash
+        run: |
+          choco install imagemagick -y
+          for size in 512 256 128 64 48 32 24 16; do
+            magick assets/locales/MaaEnd-Tiny.png -resize ${size}x${size} icon-${size}.png
+          done
+          magick icon-512.png icon-256.png icon-128.png icon-64.png icon-48.png icon-32.png icon-24.png icon-16.png maaend.ico
+
+      - name: Modify MaaEnd.exe icon
+        shell: bash
+        run: |
+          curl -L https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe -o rcedit.exe
+          ./rcedit.exe "install/MaaEnd.exe" --set-icon "maaend.ico"
+
+      - name: Remove cpp-algo debug symbols
+        shell: pwsh
+        run: |
+          if (Test-Path "install/agent/cpp-algo.pdb") {
+            Remove-Item "install/agent/cpp-algo.pdb" -Force
+          }
+
+      - name: Package ZIP
+        shell: pwsh
+        run: Compress-Archive -Path install/* -DestinationPath MaaEnd-win-x86_64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: MaaEnd-win-x86_64-zip
+          path: MaaEnd-win-x86_64.zip
+          retention-days: 14
