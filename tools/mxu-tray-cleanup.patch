@@ -1,0 +1,66 @@
+diff --git a/src-tauri/src/tray.rs b/src-tauri/src/tray.rs
+index f5e35dd..0000000 100644
+--- a/src-tauri/src/tray.rs
++++ b/src-tauri/src/tray.rs
+@@ -84,6 +84,34 @@ pub fn init_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+     Ok(())
+ }
+ 
++/// Explicitly remove the system tray icon before application exit.
++///
++/// Tauri's `TrayIcon` is reference-counted, and MXU keeps an additional clone
++/// in the static `TRAY_ICON`. Static values are not dropped during normal
++/// process teardown, so without taking this clone the underlying tray icon may
++/// never reach its final `Drop` while the application is alive. On Windows that
++/// prevents the tray implementation from sending `NIM_DELETE`, leaving a stale
++/// notification-area icon until Explorer refreshes it.
++pub fn cleanup_tray(app: &AppHandle) {
++    let tray = TRAY_ICON
++        .get()
++        .and_then(|tray_mutex| tray_mutex.lock().ok())
++        .and_then(|mut guard| guard.take());
++
++    if let Some(tray) = tray {
++        let id = tray.id().clone();
++
++        // Tauri also keeps a clone in its resource table. Remove that clone so
++        // dropping our static clone can release the underlying platform icon.
++        if let Some(registered_tray) = app.remove_tray_by_id(&id) {
++            drop(registered_tray);
++        }
++
++        drop(tray);
++        log::info!("System tray icon removed before exit");
++    }
++}
++
+ /// 显示主窗口
+ fn show_main_window(app: &AppHandle) {
+     if let Some(window) = app.get_webview_window("main") {
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 7e3f0b3..0000000 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -251,11 +251,18 @@ pub fn run() {
+         })
+         .build(tauri::generate_context!())
+         .expect("error while building tauri application")
+-        .run(|_app_handle, event| {
+-            // 退出前收尾遥测（结束 Session 与悬挂 Transaction 并 flush）
+-            if matches!(event, tauri::RunEvent::Exit) {
+-                commands::telemetry::on_app_exit();
++        .run(|app_handle, event| {
++            match event {
++                // Remove the tray while the event loop is still alive so the
++                // platform tray implementation can unregister it cleanly.
++                tauri::RunEvent::ExitRequested { .. } => {
++                    tray::cleanup_tray(app_handle);
++                }
++                // 退出前收尾遥测（结束 Session 与悬挂 Transaction 并 flush）
++                tauri::RunEvent::Exit => {
++                    commands::telemetry::on_app_exit();
++                }
++                _ => {}
+             }
+         });
+ }
