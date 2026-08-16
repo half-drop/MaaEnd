@@ -21,7 +21,6 @@ $exports = @()
 foreach ($line in $dump) {
     # Typical dumpbin line:
     #   38   25 00006D10 PowerDeterminePlatformRole
-    # Forwarded exports still have an RVA field followed by the export name.
     if ($line -match '^\s*(\d+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)\s+(\S+)(?:\s*=.*)?$') {
         $ordinal = [int]$Matches[1]
         $name = $Matches[4]
@@ -47,8 +46,7 @@ $header += '#pragma once'
 $header += "#define POWRPROF_EXPORT_COUNT $($exports.Count)"
 $header += 'static const char* const kPowrProfExportNames[POWRPROF_EXPORT_COUNT] = {'
 foreach ($entry in $exports) {
-    $escaped = $entry.Name.Replace('\\', '\\\\').Replace('"', '\\"')
-    $header += "    \"$escaped\"," 
+    $header += ('    "' + $entry.Name + '",')
 }
 $header += '};'
 Set-Content -Path (Join-Path $OutputDir 'powrprof_exports_generated.h') -Value $header -Encoding ASCII
