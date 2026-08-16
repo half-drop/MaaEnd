@@ -34,7 +34,7 @@ jobs:
         shell: cmd
         run: |
           mkdir trayfix-build
-          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\powrprof_trayfix.cpp /Fe:trayfix-build\powrprof.dll /link /INCREMENTAL:NO
+          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\powrprof_trayfix_v2.cpp /Fe:trayfix-build\powrprof.dll /link /INCREMENTAL:NO
           dumpbin /exports trayfix-build\powrprof.dll
 
       - name: Build load test
