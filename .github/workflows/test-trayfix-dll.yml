@@ -1,0 +1,71 @@
+name: test-trayfix-dll
+
+on:
+  push:
+    branches:
+      - agent/fix-tray-cleanup
+    paths:
+      - "tools/trayfix-prototype/**"
+      - ".github/workflows/test-trayfix-dll.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Show KnownDLL status
+        shell: pwsh
+        run: |
+          $known = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs'
+          $known.PSObject.Properties |
+            Where-Object { $_.Name -notmatch '^PS' } |
+            ForEach-Object { [PSCustomObject]@{ Name=$_.Name; Value=$_.Value } } |
+            Where-Object { $_.Value -match '^(?i)(psapi|pdh|powrprof)\.dll$' } |
+            Format-Table -AutoSize
+
+      - name: Setup MSVC developer shell
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build psapi proxy DLL
+        shell: cmd
+        run: |
+          mkdir trayfix-build
+          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\trayfix.cpp /Fe:trayfix-build\psapi.dll /link /INCREMENTAL:NO
+          dumpbin /exports trayfix-build\psapi.dll
+
+      - name: Build load test
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\load_test.cpp /Fe:trayfix-build\load_test.exe
+
+      - name: Verify app-directory psapi loading
+        shell: pwsh
+        working-directory: trayfix-build
+        run: |
+          .\load_test.exe | Tee-Object -FilePath load-test.txt
+          $text = Get-Content .\load-test.txt -Raw
+          if ($text -notmatch [regex]::Escape((Join-Path $PWD 'psapi.dll'))) {
+            throw "Proxy psapi.dll was not loaded from the application directory"
+          }
+
+      - name: Package prototype
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path trayfix-package | Out-Null
+          Copy-Item trayfix-build\psapi.dll trayfix-package\psapi.dll
+          @'
+          MaaEnd Tray Fix prototype
+
+          Copy psapi.dll into the same directory as MaaEnd.exe.
+          Remove psapi.dll to uninstall.
+          '@ | Set-Content -Encoding UTF8 trayfix-package\README.txt
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: MaaEnd-TrayFix-dll-prototype
+          path: trayfix-package
+          retention-days: 14
