@@ -30,7 +30,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     nid.hWnd = hwnd;
     nid.uID = 4242;
     nid.uFlags = NIF_ICON | NIF_TIP;
-    nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    nid.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
     lstrcpynW(nid.szTip, L"MaaEnd TrayFix test", ARRAYSIZE(nid.szTip));
 
     // The hosted runner may not have a normal interactive Explorer shell.
