@@ -2,119 +2,61 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <winnt.h>
+#include <cstdio>
 #include <cstring>
+#include <cwchar>
+#include <string>
 
 using ShellNotifyIconWFn = BOOL (WINAPI*)(DWORD, PNOTIFYICONDATAW);
-using ExitProcessFn = VOID (WINAPI*)(UINT);
-using TerminateProcessFn = BOOL (WINAPI*)(HANDLE, UINT);
 using NtPowerInformationFn = LONG (WINAPI*)(int, PVOID, ULONG, PVOID, ULONG);
 
 static ShellNotifyIconWFn g_shell_notify = nullptr;
-static ExitProcessFn g_exit_process = nullptr;
-static TerminateProcessFn g_terminate_process = nullptr;
 static NtPowerInformationFn g_nt_power_information = nullptr;
+static LONG g_monitor_started = 0;
 
-static SRWLOCK g_tray_lock = SRWLOCK_INIT;
-static NOTIFYICONDATAW g_tray_nid{};
-static bool g_have_tray = false;
-static HANDLE g_main_thread = nullptr;
+extern "C" IMAGE_DOS_HEADER __ImageBase;
 
-static void WriteTestMarker(const wchar_t* state) {
+static void AppendTestMarker(const wchar_t* state) {
     wchar_t marker_path[MAX_PATH]{};
     const DWORD len = GetEnvironmentVariableW(
         L"MAAEND_TRAYFIX_TEST_MARKER", marker_path, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) return;
 
     HANDLE file = CreateFileW(
-        marker_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        marker_path,
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
 
     DWORD written = 0;
-    WriteFile(file, state,
-              static_cast<DWORD>(wcslen(state) * sizeof(wchar_t)),
-              &written, nullptr);
+    WriteFile(
+        file,
+        state,
+        static_cast<DWORD>(wcslen(state) * sizeof(wchar_t)),
+        &written,
+        nullptr);
+    static constexpr wchar_t newline[] = L"\r\n";
+    WriteFile(
+        file,
+        newline,
+        static_cast<DWORD>((ARRAYSIZE(newline) - 1) * sizeof(wchar_t)),
+        &written,
+        nullptr);
     CloseHandle(file);
 }
 
-static void CleanupTray() {
-    NOTIFYICONDATAW nid{};
-    ShellNotifyIconWFn notify = nullptr;
-    bool should_delete = false;
+static bool IsRundll32Process() {
+    wchar_t path[MAX_PATH]{};
+    const DWORD len = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return false;
 
-    AcquireSRWLockExclusive(&g_tray_lock);
-    if (g_have_tray && g_shell_notify) {
-        nid = g_tray_nid;
-        notify = g_shell_notify;
-        g_have_tray = false;
-        should_delete = true;
-    }
-    ReleaseSRWLockExclusive(&g_tray_lock);
-
-    if (should_delete) {
-        notify(NIM_DELETE, &nid);
-        WriteTestMarker(L"tray-cleanup-called");
-    }
-}
-
-static BOOL WINAPI HookShellNotifyIconW(DWORD message, PNOTIFYICONDATAW data) {
-    if (!g_shell_notify) return FALSE;
-
-    const BOOL result = g_shell_notify(message, data);
-
-    if (data && message == NIM_ADD) {
-        AcquireSRWLockExclusive(&g_tray_lock);
-        std::memset(&g_tray_nid, 0, sizeof(g_tray_nid));
-        const SIZE_T copy_size =
-            data->cbSize < sizeof(g_tray_nid) ? data->cbSize : sizeof(g_tray_nid);
-        std::memcpy(&g_tray_nid, data, copy_size);
-        g_have_tray = true;
-        ReleaseSRWLockExclusive(&g_tray_lock);
-    } else if (data && message == NIM_DELETE) {
-        AcquireSRWLockExclusive(&g_tray_lock);
-        if (g_have_tray &&
-            g_tray_nid.hWnd == data->hWnd &&
-            g_tray_nid.uID == data->uID) {
-            g_have_tray = false;
-        }
-        ReleaseSRWLockExclusive(&g_tray_lock);
-    }
-
-    return result;
-}
-
-static VOID WINAPI HookExitProcess(UINT code) {
-    CleanupTray();
-    if (g_exit_process) {
-        g_exit_process(code);
-    }
-
-    // Should be unreachable, but keep a hard fallback if the original IAT
-    // pointer was unavailable for an unexpected binary layout.
-    auto kernel32 = GetModuleHandleW(L"kernel32.dll");
-    auto fallback = kernel32
-        ? reinterpret_cast<ExitProcessFn>(GetProcAddress(kernel32, "ExitProcess"))
-        : nullptr;
-    if (fallback) fallback(code);
-    for (;;) Sleep(INFINITE);
-}
-
-static BOOL WINAPI HookTerminateProcess(HANDLE process, UINT code) {
-    if (process == GetCurrentProcess() ||
-        (process && GetProcessId(process) == GetCurrentProcessId())) {
-        CleanupTray();
-    }
-
-    if (g_terminate_process) {
-        return g_terminate_process(process, code);
-    }
-
-    auto kernel32 = GetModuleHandleW(L"kernel32.dll");
-    auto fallback = kernel32
-        ? reinterpret_cast<TerminateProcessFn>(
-              GetProcAddress(kernel32, "TerminateProcess"))
-        : nullptr;
-    return fallback ? fallback(process, code) : FALSE;
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    return _wcsicmp(name, L"rundll32.exe") == 0;
 }
 
 static bool PatchImport(
@@ -193,33 +135,93 @@ static bool PatchImport(
     return false;
 }
 
-static void InstallHooks() {
-    PatchImport(
-        "shell32.dll", "Shell_NotifyIconW",
-        reinterpret_cast<void*>(&HookShellNotifyIconW),
-        reinterpret_cast<void**>(&g_shell_notify));
+static void StartMonitor(HWND hwnd, UINT uid) {
+    if (InterlockedCompareExchange(&g_monitor_started, 1, 0) != 0) {
+        return;
+    }
 
-    PatchImport(
-        "kernel32.dll", "ExitProcess",
-        reinterpret_cast<void*>(&HookExitProcess),
-        reinterpret_cast<void**>(&g_exit_process));
+    wchar_t dll_path[MAX_PATH]{};
+    if (!GetModuleFileNameW(
+            reinterpret_cast<HMODULE>(&__ImageBase),
+            dll_path,
+            MAX_PATH)) {
+        InterlockedExchange(&g_monitor_started, 0);
+        return;
+    }
 
-    PatchImport(
-        "kernel32.dll", "TerminateProcess",
-        reinterpret_cast<void*>(&HookTerminateProcess),
-        reinterpret_cast<void**>(&g_terminate_process));
+    wchar_t system_dir[MAX_PATH]{};
+    const UINT system_len = GetSystemDirectoryW(system_dir, MAX_PATH);
+    if (system_len == 0 || system_len >= MAX_PATH) {
+        InterlockedExchange(&g_monitor_started, 0);
+        return;
+    }
+
+    const DWORD pid = GetCurrentProcessId();
+    const unsigned long long hwnd_value =
+        static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(hwnd));
+
+    wchar_t command_line[2048]{};
+    const int written = _snwprintf_s(
+        command_line,
+        ARRAYSIZE(command_line),
+        _TRUNCATE,
+        L"\"%s\\rundll32.exe\" \"%s\",TrayFixMonitor %lu %llx %u",
+        system_dir,
+        dll_path,
+        static_cast<unsigned long>(pid),
+        hwnd_value,
+        static_cast<unsigned int>(uid));
+    if (written < 0) {
+        InterlockedExchange(&g_monitor_started, 0);
+        return;
+    }
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    if (!CreateProcessW(
+            nullptr,
+            command_line,
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &si,
+            &pi)) {
+        InterlockedExchange(&g_monitor_started, 0);
+        return;
+    }
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    AppendTestMarker(L"monitor-started");
+}
+
+static BOOL WINAPI HookShellNotifyIconW(DWORD message, PNOTIFYICONDATAW data) {
+    if (!g_shell_notify) return FALSE;
+
+    const BOOL result = g_shell_notify(message, data);
+
+    if (data && message == NIM_ADD) {
+        AppendTestMarker(L"hook-seen");
+        StartMonitor(data->hWnd, data->uID);
+    }
+
+    return result;
 }
 
 static DWORD WINAPI PatchWorker(void*) {
-    // This worker starts after DLL_PROCESS_ATTACH returns, so hook setup does
-    // not perform VirtualProtect work while the loader lock is held.
-    InstallHooks();
+    const bool hooked = PatchImport(
+        "shell32.dll",
+        "Shell_NotifyIconW",
+        reinterpret_cast<void*>(&HookShellNotifyIconW),
+        reinterpret_cast<void**>(&g_shell_notify));
 
-    if (g_main_thread) {
-        WaitForSingleObject(g_main_thread, INFINITE);
-        CleanupTray();
-        CloseHandle(g_main_thread);
-        g_main_thread = nullptr;
+    if (hooked) {
+        AppendTestMarker(L"hook-installed");
     }
     return 0;
 }
@@ -251,19 +253,56 @@ extern "C" __declspec(dllexport) LONG WINAPI CallNtPowerInformation(
         output_buffer_length);
 }
 
+extern "C" __declspec(dllexport) void CALLBACK TrayFixMonitor(
+    HWND,
+    HINSTANCE,
+    LPSTR command_line,
+    int) {
+
+    unsigned long pid = 0;
+    unsigned long long hwnd_value = 0;
+    unsigned int uid = 0;
+    if (!command_line ||
+        sscanf_s(command_line, "%lu %llx %u", &pid, &hwnd_value, &uid) != 3) {
+        AppendTestMarker(L"monitor-parse-failed");
+        return;
+    }
+
+    HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (parent) {
+        WaitForSingleObject(parent, INFINITE);
+        CloseHandle(parent);
+    }
+
+    HMODULE shell32 = GetModuleHandleW(L"shell32.dll");
+    auto notify = shell32
+        ? reinterpret_cast<ShellNotifyIconWFn>(
+              GetProcAddress(shell32, "Shell_NotifyIconW"))
+        : nullptr;
+
+    if (notify) {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = reinterpret_cast<HWND>(
+            static_cast<uintptr_t>(hwnd_value));
+        nid.uID = static_cast<UINT>(uid);
+        notify(NIM_DELETE, &nid);
+        AppendTestMarker(L"monitor-cleanup-called");
+    } else {
+        AppendTestMarker(L"monitor-shell32-failed");
+    }
+}
+
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(instance);
 
-        DuplicateHandle(
-            GetCurrentProcess(), GetCurrentThread(),
-            GetCurrentProcess(), &g_main_thread,
-            SYNCHRONIZE, FALSE, 0);
-
-        HANDLE worker = CreateThread(
-            nullptr, 0, PatchWorker, nullptr, 0, nullptr);
-        if (worker) {
-            CloseHandle(worker);
+        if (!IsRundll32Process()) {
+            HANDLE worker = CreateThread(
+                nullptr, 0, PatchWorker, nullptr, 0, nullptr);
+            if (worker) {
+                CloseHandle(worker);
+            }
         }
     }
     return TRUE;
