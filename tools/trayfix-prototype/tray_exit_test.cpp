@@ -3,6 +3,7 @@
 #include <shellapi.h>
 #include <powrprof.h>
 
+#pragma comment(lib, "User32.lib")
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "PowrProf.lib")
 
