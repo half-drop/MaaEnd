@@ -50,17 +50,36 @@ jobs:
         shell: cmd
         run: cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\tray_exit_test.cpp /Fe:trayfix-build\tray_exit_test.exe /link /SUBSYSTEM:WINDOWS
 
-      - name: Verify exit hook performs tray cleanup
+      - name: Verify independent monitor performs tray cleanup
         shell: pwsh
         working-directory: trayfix-build
         run: |
           $marker = Join-Path $PWD 'cleanup-marker.txt'
           $env:MAAEND_TRAYFIX_TEST_MARKER = $marker
           .\tray_exit_test.exe
-          if (-not (Test-Path $marker)) {
-            throw 'Tray cleanup marker was not created; exit hook did not run'
+
+          $deadline = (Get-Date).AddSeconds(10)
+          $text = ''
+          do {
+            Start-Sleep -Milliseconds 250
+            if (Test-Path $marker) {
+              $text = Get-Content $marker -Raw -Encoding Unicode
+            }
+          } while ((Get-Date) -lt $deadline -and $text -notmatch 'monitor-cleanup-called')
+
+          Write-Host $text
+          if ($text -notmatch 'hook-installed') {
+            throw 'Shell_NotifyIconW hook was not installed'
           }
-          Get-Content $marker -Encoding Unicode
+          if ($text -notmatch 'hook-seen') {
+            throw 'Shell_NotifyIconW hook did not observe NIM_ADD'
+          }
+          if ($text -notmatch 'monitor-started') {
+            throw 'Independent rundll32 monitor was not started'
+          }
+          if ($text -notmatch 'monitor-cleanup-called') {
+            throw 'Independent monitor did not execute NIM_DELETE after parent exit'
+          }
 
       - name: Package DLL
         shell: pwsh
@@ -77,9 +96,9 @@ jobs:
             Exit MaaEnd and delete powrprof.dll.
 
           Purpose:
-            Explicitly unregister the MaaEnd notification-area icon before the
-            process exits, preventing the stale/ghost tray icon that otherwise
-            remains until Explorer refreshes it.
+            Watches MaaEnd's notification-area icon registration. An independent
+            Windows rundll32 monitor waits for MaaEnd to terminate and then sends
+            NIM_DELETE to Explorer, preventing the stale/ghost tray icon.
           '@ | Set-Content -Encoding UTF8 trayfix-package\README.txt
 
       - uses: actions/upload-artifact@v6
