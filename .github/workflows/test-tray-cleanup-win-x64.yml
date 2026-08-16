@@ -51,7 +51,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/MistEO/MXU.git mxu-src
           cd mxu-src
-          git apply ../tools/mxu-tray-cleanup.patch
+          git apply --recount ../tools/mxu-tray-cleanup.patch
           git diff --check
           git diff
 
