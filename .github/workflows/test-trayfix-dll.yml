@@ -15,37 +15,75 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Show KnownDLL status
-        shell: pwsh
-        run: |
-          $known = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs'
-          $known.PSObject.Properties |
-            Where-Object { $_.Name -notmatch '^PS' } |
-            ForEach-Object { [PSCustomObject]@{ Name=$_.Name; Value=$_.Value } } |
-            Where-Object { $_.Value -match '^(?i)(psapi|pdh|powrprof)\.dll$' } |
-            Format-Table -AutoSize
-
       - name: Setup MSVC developer shell
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Inspect system PowrProf imports
+      - name: Verify PowrProf wrapper target
         shell: cmd
-        run: dumpbin /imports C:\Windows\System32\powrprof.dll | findstr /I "NtPowerInformation CallNtPowerInformation"
+        run: dumpbin /imports C:\Windows\System32\powrprof.dll | findstr /I "NtPowerInformation"
 
-      - name: Build powrprof proxy probe
+      - name: Compare system PowrProf with ntdll
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\power_compare.cpp /Fe:power_compare.exe
+          power_compare.exe
+
+      - name: Build final TrayFix DLL
         shell: cmd
         run: |
           mkdir trayfix-build
-          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\powrprof_test.cpp /Fe:trayfix-build\powrprof.dll /link /INCREMENTAL:NO
+          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\powrprof_trayfix.cpp /Fe:trayfix-build\powrprof.dll /link /INCREMENTAL:NO
           dumpbin /exports trayfix-build\powrprof.dll
 
-      - name: Build powrprof load test
+      - name: Build load test
         shell: cmd
         run: cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\powrprof_load_test.cpp /Fe:trayfix-build\powrprof_load_test.exe
 
-      - name: Verify app-directory powrprof loading
+      - name: Verify single-file application-directory loading
         shell: pwsh
         working-directory: trayfix-build
         run: .\powrprof_load_test.exe
+
+      - name: Build tray exit harness
+        shell: cmd
+        run: cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\tray_exit_test.cpp /Fe:trayfix-build\tray_exit_test.exe /link /SUBSYSTEM:WINDOWS
+
+      - name: Verify exit hook performs tray cleanup
+        shell: pwsh
+        working-directory: trayfix-build
+        run: |
+          $marker = Join-Path $PWD 'cleanup-marker.txt'
+          $env:MAAEND_TRAYFIX_TEST_MARKER = $marker
+          .\tray_exit_test.exe
+          if (-not (Test-Path $marker)) {
+            throw 'Tray cleanup marker was not created; exit hook did not run'
+          }
+          Get-Content $marker -Encoding Unicode
+
+      - name: Package DLL
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path trayfix-package | Out-Null
+          Copy-Item trayfix-build\powrprof.dll trayfix-package\powrprof.dll
+          @'
+          MaaEnd TrayFix (x86_64)
+
+          Install:
+            Copy powrprof.dll into the same directory as MaaEnd.exe.
+
+          Uninstall:
+            Exit MaaEnd and delete powrprof.dll.
+
+          Purpose:
+            Explicitly unregister the MaaEnd notification-area icon before the
+            process exits, preventing the stale/ghost tray icon that otherwise
+            remains until Explorer refreshes it.
+          '@ | Set-Content -Encoding UTF8 trayfix-package\README.txt
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: MaaEnd-TrayFix-win-x86_64
+          path: trayfix-package
+          retention-days: 14
