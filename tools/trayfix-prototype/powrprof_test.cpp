@@ -2,13 +2,13 @@
 #include <windows.h>
 #include <powrprof.h>
 
-extern "C" __declspec(dllexport) NTSTATUS WINAPI CallNtPowerInformation(
+extern "C" __declspec(dllexport) LONG WINAPI CallNtPowerInformation(
     POWER_INFORMATION_LEVEL,
     PVOID,
     ULONG,
     PVOID,
     ULONG) {
-    return static_cast<NTSTATUS>(0x12345678L);
+    return 0x12345678L;
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
