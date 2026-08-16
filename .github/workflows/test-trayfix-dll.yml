@@ -20,9 +20,11 @@ jobs:
         with:
           arch: x64
 
-      - name: Verify PowrProf wrapper target
+      - name: Verify PowrProf wrapper targets
         shell: cmd
-        run: dumpbin /imports C:\Windows\System32\powrprof.dll | findstr /I "NtPowerInformation"
+        run: |
+          dumpbin /imports C:\Windows\System32\powrprof.dll | findstr /I "NtPowerInformation"
+          dumpbin /exports C:\Windows\System32\powrprof.dll | findstr /I "PowerDeterminePlatformRole"
 
       - name: Compare system PowrProf with ntdll
         shell: cmd
@@ -34,7 +36,7 @@ jobs:
         shell: cmd
         run: |
           mkdir trayfix-build
-          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\powrprof_trayfix_v2.cpp /Fe:trayfix-build\powrprof.dll /link /INCREMENTAL:NO
+          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\powrprof_trayfix_v3.cpp /Fe:trayfix-build\powrprof.dll /link /INCREMENTAL:NO
           dumpbin /exports trayfix-build\powrprof.dll
 
       - name: Build load test
@@ -45,6 +47,32 @@ jobs:
         shell: pwsh
         working-directory: trayfix-build
         run: .\powrprof_load_test.exe
+
+      - name: Build NVIDIA compatibility test
+        shell: cmd
+        run: cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\platform_role_test.cpp /Fe:trayfix-build\platform_role_test.exe
+
+      - name: Verify PowerDeterminePlatformRole forwarding
+        shell: pwsh
+        working-directory: trayfix-build
+        run: |
+          $marker = Join-Path $PWD 'platform-role-marker.txt'
+          $env:MAAEND_TRAYFIX_TEST_MARKER = $marker
+          .\platform_role_test.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "platform_role_test failed with exit code $LASTEXITCODE"
+          }
+          $text = Get-Content $marker -Raw -Encoding Unicode
+          Write-Host $text
+          if ($text -notmatch 'system-powrprof-loaded') {
+            throw 'Proxy did not load the real System32 PowrProf.dll'
+          }
+          if ($text -notmatch 'platform-role-forwarded') {
+            throw 'PowerDeterminePlatformRole was not forwarded'
+          }
+          if ($text -notmatch 'platform-role-ex-forwarded') {
+            throw 'PowerDeterminePlatformRoleEx was not forwarded'
+          }
 
       - name: Build tray exit harness
         shell: cmd
@@ -99,6 +127,11 @@ jobs:
             Watches MaaEnd's notification-area icon registration. An independent
             Windows rundll32 monitor waits for MaaEnd to terminate and then sends
             NIM_DELETE to Explorer, preventing the stale/ghost tray icon.
+
+          Compatibility:
+            Forwards PowerDeterminePlatformRole and PowerDeterminePlatformRoleEx
+            to the real System32 PowrProf.dll so NVIDIA user-mode driver modules
+            can continue to resolve their PowrProf dependency.
           '@ | Set-Content -Encoding UTF8 trayfix-package\README.txt
 
       - uses: actions/upload-artifact@v6
