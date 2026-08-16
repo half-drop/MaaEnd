@@ -20,58 +20,74 @@ jobs:
         with:
           arch: x64
 
-      - name: Verify PowrProf wrapper targets
-        shell: cmd
+      - name: Generate full PowrProf proxy surface
+        shell: pwsh
         run: |
-          dumpbin /imports C:\Windows\System32\powrprof.dll | findstr /I "NtPowerInformation"
-          dumpbin /exports C:\Windows\System32\powrprof.dll | findstr /I "PowerDeterminePlatformRole"
+          New-Item -ItemType Directory -Force -Path trayfix-build\generated | Out-Null
+          .\tools\trayfix-prototype\generate_powrprof_proxy.ps1 -OutputDir trayfix-build\generated
 
-      - name: Compare system PowrProf with ntdll
+      - name: Build full PowrProf proxy DLL
         shell: cmd
         run: |
-          cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\power_compare.cpp /Fe:power_compare.exe
-          power_compare.exe
-
-      - name: Build final TrayFix DLL
-        shell: cmd
-        run: |
-          mkdir trayfix-build
-          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\powrprof_trayfix_v3.cpp /Fe:trayfix-build\powrprof.dll /link /INCREMENTAL:NO
+          ml64 /nologo /c /Fo:trayfix-build\powrprof_proxy.obj trayfix-build\generated\powrprof_proxy.asm
+          cl /nologo /std:c++17 /O2 /EHsc /LD /I trayfix-build\generated tools\trayfix-prototype\powrprof_trayfix_v4.cpp trayfix-build\powrprof_proxy.obj /Fe:trayfix-build\powrprof.dll /link /DEF:trayfix-build\generated\powrprof_proxy.def /INCREMENTAL:NO
           dumpbin /exports trayfix-build\powrprof.dll
 
-      - name: Build load test
+      - name: Verify complete system export parity
+        shell: pwsh
+        run: |
+          function Get-ExportNames([string]$Path) {
+            $names = @()
+            foreach ($line in (& dumpbin /nologo /exports $Path)) {
+              if ($line -match '^\s*(\d+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)\s+(\S+)(?:\s*=.*)?$') {
+                if ($Matches[4] -ne '[NONAME]') {
+                  $names += $Matches[4]
+                }
+              }
+            }
+            return $names | Sort-Object -Unique
+          }
+
+          $system = Get-ExportNames "$env:SystemRoot\System32\powrprof.dll"
+          $proxy = Get-ExportNames "trayfix-build\powrprof.dll"
+          $missing = $system | Where-Object { $_ -notin $proxy }
+          if ($missing.Count -gt 0) {
+            Write-Host 'Missing proxy exports:'
+            $missing | ForEach-Object { Write-Host "  $_" }
+            throw "Proxy is missing $($missing.Count) system PowrProf export(s)"
+          }
+          if ('GetPwrCapabilities' -notin $proxy) {
+            throw 'GetPwrCapabilities is not exported by the proxy'
+          }
+          Write-Host "System exports: $($system.Count); proxy exports: $($proxy.Count)"
+
+      - name: Build basic load test
         shell: cmd
         run: cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\powrprof_load_test.cpp /Fe:trayfix-build\powrprof_load_test.exe
 
-      - name: Verify single-file application-directory loading
+      - name: Verify application-directory loading and CallNtPowerInformation
         shell: pwsh
         working-directory: trayfix-build
         run: .\powrprof_load_test.exe
 
       - name: Build NVIDIA compatibility test
         shell: cmd
-        run: cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\platform_role_test.cpp /Fe:trayfix-build\platform_role_test.exe
+        run: cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\powrprof_nvidia_compat_test.cpp /Fe:trayfix-build\powrprof_nvidia_compat_test.exe
 
-      - name: Verify PowerDeterminePlatformRole forwarding
+      - name: Verify GetPwrCapabilities and platform-role forwarding
         shell: pwsh
         working-directory: trayfix-build
         run: |
-          $marker = Join-Path $PWD 'platform-role-marker.txt'
+          $marker = Join-Path $PWD 'powrprof-forward-marker.txt'
           $env:MAAEND_TRAYFIX_TEST_MARKER = $marker
-          .\platform_role_test.exe
+          .\powrprof_nvidia_compat_test.exe
           if ($LASTEXITCODE -ne 0) {
-            throw "platform_role_test failed with exit code $LASTEXITCODE"
+            throw "powrprof_nvidia_compat_test failed with exit code $LASTEXITCODE"
           }
           $text = Get-Content $marker -Raw -Encoding Unicode
           Write-Host $text
           if ($text -notmatch 'system-powrprof-loaded') {
             throw 'Proxy did not load the real System32 PowrProf.dll'
-          }
-          if ($text -notmatch 'platform-role-forwarded') {
-            throw 'PowerDeterminePlatformRole was not forwarded'
-          }
-          if ($text -notmatch 'platform-role-ex-forwarded') {
-            throw 'PowerDeterminePlatformRoleEx was not forwarded'
           }
 
       - name: Build tray exit harness
@@ -115,7 +131,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path trayfix-package | Out-Null
           Copy-Item trayfix-build\powrprof.dll trayfix-package\powrprof.dll
           @'
-          MaaEnd TrayFix (x86_64)
+          MaaEnd TrayFix v4 (x86_64)
 
           Install:
             Copy powrprof.dll into the same directory as MaaEnd.exe.
@@ -124,18 +140,21 @@ jobs:
             Exit MaaEnd and delete powrprof.dll.
 
           Purpose:
-            Watches MaaEnd's notification-area icon registration. An independent
-            Windows rundll32 monitor waits for MaaEnd to terminate and then sends
-            NIM_DELETE to Explorer, preventing the stale/ghost tray icon.
+            Prevents MaaEnd's stale notification-area icon after process exit.
+            An independent Windows rundll32 monitor waits for MaaEnd to terminate
+            and then sends NIM_DELETE to Explorer.
 
           Compatibility:
-            Forwards PowerDeterminePlatformRole and PowerDeterminePlatformRoleEx
-            to the real System32 PowrProf.dll so NVIDIA user-mode driver modules
-            can continue to resolve their PowrProf dependency.
+            This build mirrors the complete named export surface of the Windows
+            System32 PowrProf.dll used by the build runner. Calls are lazily
+            forwarded through x64 register-preserving tail-jump stubs to the real
+            System32 PowrProf.dll. This includes NVIDIA-used APIs such as
+            GetPwrCapabilities, PowerDeterminePlatformRole, and
+            PowerDeterminePlatformRoleEx.
           '@ | Set-Content -Encoding UTF8 trayfix-package\README.txt
 
       - uses: actions/upload-artifact@v6
         with:
-          name: MaaEnd-TrayFix-win-x86_64
+          name: MaaEnd-TrayFix-win-x86_64-v4
           path: trayfix-package
           retention-days: 14
