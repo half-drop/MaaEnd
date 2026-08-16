@@ -8,6 +8,7 @@ on:
       - ".github/workflows/test-tray-cleanup-win-x64.yml"
   workflow_dispatch:
 
+# Build MaaEnd with a source-built MXU carrying the tray cleanup fix.
 jobs:
   build:
     runs-on: windows-latest
