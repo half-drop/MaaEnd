@@ -1,9 +1,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <powrprof.h>
 
 extern "C" __declspec(dllexport) LONG WINAPI CallNtPowerInformation(
-    POWER_INFORMATION_LEVEL,
+    int,
     PVOID,
     ULONG,
     PVOID,
