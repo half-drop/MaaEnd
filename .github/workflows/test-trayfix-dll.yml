@@ -29,7 +29,7 @@ jobs:
       - name: Build full PowrProf proxy DLL
         shell: cmd
         run: |
-          ml64 /nologo /c /Fo:trayfix-build\powrprof_proxy.obj trayfix-build\generated\powrprof_proxy.asm
+          ml64 /nologo /c /Fo trayfix-build\powrprof_proxy.obj trayfix-build\generated\powrprof_proxy.asm
           cl /nologo /std:c++17 /O2 /EHsc /LD /I trayfix-build\generated tools\trayfix-prototype\powrprof_trayfix_v4.cpp trayfix-build\powrprof_proxy.obj /Fe:trayfix-build\powrprof.dll /link /DEF:trayfix-build\generated\powrprof_proxy.def /INCREMENTAL:NO
           dumpbin /exports trayfix-build\powrprof.dll
 
