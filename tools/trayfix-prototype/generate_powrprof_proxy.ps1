@@ -19,8 +19,6 @@ if ($LASTEXITCODE -ne 0) {
 
 $exports = @()
 foreach ($line in $dump) {
-    # Typical dumpbin line:
-    #   38   25 00006D10 PowerDeterminePlatformRole
     if ($line -match '^\s*(\d+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)\s+(\S+)(?:\s*=.*)?$') {
         $ordinal = [int]$Matches[1]
         $name = $Matches[4]
@@ -82,9 +80,6 @@ for ($i = 0; $i -lt $exports.Count; $i++) {
     $asm += '    test rax, rax'
     $asm += "    jnz $ready"
     $asm += ''
-    # Preserve all Windows x64 register arguments before calling the resolver.
-    # 0x88 bytes keeps RSP 16-byte aligned and leaves the required 32-byte
-    # shadow space at [rsp, rsp+1fh].
     $asm += '    sub rsp, 088h'
     $asm += '    mov QWORD PTR [rsp+020h], rcx'
     $asm += '    mov QWORD PTR [rsp+028h], rdx'
@@ -107,7 +102,7 @@ for ($i = 0; $i -lt $exports.Count; $i++) {
     $asm += '    mov r9, QWORD PTR [rsp+038h]'
     $asm += '    add rsp, 088h'
     $asm += '    mov rax, r11'
-    $asm += "$ready:"
+    $asm += ($ready + ':')
     $asm += '    jmp rax'
     $asm += "$stub ENDP"
     $asm += ''
