@@ -30,42 +30,22 @@ jobs:
         with:
           arch: x64
 
-      - name: Build psapi proxy DLL
+      - name: Inspect system PowrProf imports
+        shell: cmd
+        run: dumpbin /imports C:\Windows\System32\powrprof.dll | findstr /I "NtPowerInformation CallNtPowerInformation"
+
+      - name: Build powrprof proxy probe
         shell: cmd
         run: |
           mkdir trayfix-build
-          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\trayfix.cpp /Fe:trayfix-build\psapi.dll /link /INCREMENTAL:NO
-          dumpbin /exports trayfix-build\psapi.dll
+          cl /nologo /std:c++17 /O2 /EHsc /LD tools\trayfix-prototype\powrprof_test.cpp /Fe:trayfix-build\powrprof.dll /link /INCREMENTAL:NO
+          dumpbin /exports trayfix-build\powrprof.dll
 
-      - name: Build load test
+      - name: Build powrprof load test
         shell: cmd
-        run: |
-          cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\load_test.cpp /Fe:trayfix-build\load_test.exe
+        run: cl /nologo /std:c++17 /O2 /EHsc tools\trayfix-prototype\powrprof_load_test.cpp /Fe:trayfix-build\powrprof_load_test.exe
 
-      - name: Verify app-directory psapi loading
+      - name: Verify app-directory powrprof loading
         shell: pwsh
         working-directory: trayfix-build
-        run: |
-          .\load_test.exe | Tee-Object -FilePath load-test.txt
-          $text = Get-Content .\load-test.txt -Raw
-          if ($text -notmatch [regex]::Escape((Join-Path $PWD 'psapi.dll'))) {
-            throw "Proxy psapi.dll was not loaded from the application directory"
-          }
-
-      - name: Package prototype
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path trayfix-package | Out-Null
-          Copy-Item trayfix-build\psapi.dll trayfix-package\psapi.dll
-          @'
-          MaaEnd Tray Fix prototype
-
-          Copy psapi.dll into the same directory as MaaEnd.exe.
-          Remove psapi.dll to uninstall.
-          '@ | Set-Content -Encoding UTF8 trayfix-package\README.txt
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: MaaEnd-TrayFix-dll-prototype
-          path: trayfix-package
-          retention-days: 14
+        run: .\powrprof_load_test.exe
