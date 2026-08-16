@@ -15,7 +15,7 @@ int wmain() {
     GetModuleFileNameW(mod, module_path, MAX_PATH);
     std::wcout << L"Loaded powrprof: " << module_path << L"\n";
 
-    NTSTATUS status = CallNtPowerInformation(SystemBatteryState, nullptr, 0, nullptr, 0);
+    LONG status = CallNtPowerInformation(SystemBatteryState, nullptr, 0, nullptr, 0);
     std::wcout << L"Status: 0x" << std::hex << static_cast<unsigned long>(status) << L"\n";
-    return status == static_cast<NTSTATUS>(0x12345678L) ? 0 : 3;
+    return status == 0x12345678L ? 0 : 3;
 }
