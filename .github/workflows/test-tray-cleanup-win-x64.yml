@@ -6,9 +6,9 @@ on:
       - agent/fix-tray-cleanup
     paths:
       - ".github/workflows/test-tray-cleanup-win-x64.yml"
+      - "tools/mxu-tray-cleanup.patch"
   workflow_dispatch:
 
-# Build MaaEnd with a source-built MXU carrying the tray cleanup fix.
 jobs:
   build:
     runs-on: windows-latest
@@ -46,74 +46,14 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Clone MXU
-        shell: pwsh
-        run: git clone --depth 1 https://github.com/MistEO/MXU.git mxu-src
-
-      - name: Patch MXU tray cleanup
-        shell: python
+      - name: Clone and patch MXU
+        shell: bash
         run: |
-          from pathlib import Path
-
-          tray = Path('mxu-src/src-tauri/src/tray.rs')
-          text = tray.read_text(encoding='utf-8')
-          marker = '\n/// 显示主窗口\n'
-          cleanup = r'''
-/// 显式移除系统托盘图标。
-///
-/// Tauri 的 TrayIcon 是引用计数对象；MXU 还在静态 TRAY_ICON 中保存了一份引用。
-/// 如果应用直接退出而不取出这份静态引用，底层 tray-icon 的 Drop 不会执行，
-/// Windows 因而收不到 NIM_DELETE，Explorer 会暂时保留“幽灵”托盘图标。
-pub fn cleanup_tray(app: &AppHandle) {
-    let tray = TRAY_ICON
-        .get()
-        .and_then(|tray_mutex| tray_mutex.lock().ok())
-        .and_then(|mut guard| guard.take());
-
-    if let Some(tray) = tray {
-        let id = tray.id().clone();
-
-        // Tauri 在资源表中还保存了一份 TrayIcon clone；显式移除它。
-        if let Some(registered_tray) = app.remove_tray_by_id(&id) {
-            drop(registered_tray);
-        }
-
-        // 释放 MXU 静态变量持有的最后一份引用，使底层 Windows 托盘对象执行 Drop。
-        drop(tray);
-        log::info!("System tray icon removed before exit");
-    }
-}
-'''
-          if 'pub fn cleanup_tray(app: &AppHandle)' not in text:
-              if marker not in text:
-                  raise SystemExit('tray.rs insertion marker not found')
-              text = text.replace(marker, '\n' + cleanup + marker, 1)
-              tray.write_text(text, encoding='utf-8')
-
-          lib = Path('mxu-src/src-tauri/src/lib.rs')
-          text = lib.read_text(encoding='utf-8')
-          old = '''        .run(|_app_handle, event| {
-            // 退出前收尾遥测（结束 Session 与悬挂 Transaction 并 flush）
-            if matches!(event, tauri::RunEvent::Exit) {
-                commands::telemetry::on_app_exit();
-            }
-        });'''
-          new = '''        .run(|app_handle, event| {
-            match event {
-                // 在事件循环真正退出前显式移除托盘，确保 Windows 收到 NIM_DELETE。
-                tauri::RunEvent::ExitRequested { .. } => {
-                    tray::cleanup_tray(app_handle);
-                }
-                // 退出前收尾遥测（结束 Session 与悬挂 Transaction 并 flush）
-                tauri::RunEvent::Exit => {
-                    commands::telemetry::on_app_exit();
-                }
-                _ => {}
-            }
-        });'''
-          if old not in text:
-              raise SystemExit('lib.rs exit handler block not found')
-          lib.write_text(text.replace(old, new, 1), encoding='utf-8')
+          git clone --depth 1 https://github.com/MistEO/MXU.git mxu-src
+          cd mxu-src
+          git apply ../tools/mxu-tray-cleanup.patch
+          git diff --check
+          git diff
 
       - name: Install MXU frontend dependencies
         working-directory: mxu-src
