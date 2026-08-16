@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <winnt.h>
 #include <cstdio>
+#include <cwchar>
 
 using PowerDeterminePlatformRoleFn = POWER_PLATFORM_ROLE (WINAPI*)();
 using PowerDeterminePlatformRoleExFn = POWER_PLATFORM_ROLE (WINAPI*)(ULONG);
@@ -15,7 +16,7 @@ int wmain() {
 
     wchar_t path[MAX_PATH]{};
     GetModuleFileNameW(module, path, MAX_PATH);
-    std::wprintf(L"Loaded powrprof: %ls\n", path);
+    ::wprintf(L"Loaded powrprof: %ls\n", path);
 
     auto role = reinterpret_cast<PowerDeterminePlatformRoleFn>(
         GetProcAddress(module, "PowerDeterminePlatformRole"));
